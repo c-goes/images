@@ -1,0 +1,91 @@
+name: images
+
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.load.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: load
+        run: echo "matrix=$(jq -c . images.json)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    concurrency:
+      group: ${{ github.workflow }}-${{ matrix.image.name }}
+      cancel-in-progress: false
+    env:
+      TARGET: ghcr.io/${{ github.repository }}/${{ matrix.image.name }}:latest
+      BASES: ${{ toJSON(matrix.image.bases) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: imjasonh/setup-crane@v0.4
+
+      - run: crane auth login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Digests vergleichen
+        id: check
+        run: |
+          set -euo pipefail
+          CFG=$(crane config "$TARGET" 2>/dev/null || echo '{}')
+          changed=false
+          args=""
+          labels=""
+
+          for key in $(jq -r 'keys[]' <<<"$BASES"); do
+            ref=$(jq -r --arg k "$key" '.[$k]' <<<"$BASES")
+            new=$(crane digest "$ref")
+            old=$(jq -r --arg k "base.$key.digest" '.config.Labels[$k] // ""' <<<"$CFG")
+            echo "$key: $old -> $new"
+            [ "$new" != "$old" ] && changed=true
+            args+="$key=$ref@$new"$'\n'
+            labels+="base.$key.digest=$new"$'\n'
+          done
+
+          [ "${{ github.event_name }}" != "schedule" ] && changed=true
+
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          {
+            echo "args<<XEOF"; printf '%s' "$args"; echo "XEOF"
+            echo "labels<<XEOF"; printf '%s' "$labels"; echo "XEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.check.outputs.changed == 'true'
+
+      - uses: docker/login-action@v3
+        if: steps.check.outputs.changed == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        if: steps.check.outputs.changed == 'true'
+        with:
+          context: ${{ matrix.image.context }}
+          push: true
+          tags: ${{ env.TARGET }}
+          build-args: ${{ steps.check.outputs.args }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            ${{ steps.check.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}

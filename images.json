@@ -1,0 +1,10 @@
+[
+  {
+    "name": "caddy-hetzner",
+    "context": "caddy-hetzner",
+    "bases": {
+      "BUILDER": "docker.io/library/caddy:2-builder",
+      "RUNTIME": "docker.io/library/caddy:2-alpine"
+    }
+  }
+]
