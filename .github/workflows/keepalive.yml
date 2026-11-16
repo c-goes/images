@@ -1,0 +1,37 @@
+# .github/workflows/keepalive.yml
+# Prevents GitHub from disabling scheduled workflows after 60 days of inactivity.
+# Periodically calls the "enable" API, which resets the 60-day timer –
+# no dummy commits needed. Manually disabled workflows stay disabled.
+
+name: Keepalive
+
+on:
+  schedule:
+    - cron: "17 4 1 * *"   # 1st of every month, 04:17 UTC
+  workflow_dispatch:        # manual trigger (requires write access to the repo)
+
+# All other token scopes (contents, packages, ...) are set to "none".
+permissions:
+  actions: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Keep active workflows alive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Only "active" (reset timer) and "disabled_inactivity" (revive).
+          # "disabled_manually" is intentionally left untouched.
+          ids=$(gh api "repos/$REPO/actions/workflows" --paginate \
+            --jq '.workflows[] | select(.state == "active" or .state == "disabled_inactivity") | .id')
+          for id in $ids; do
+            [[ "$id" =~ ^[0-9]+$ ]] || { echo "Unexpected ID: $id" >&2; exit 1; }
+            echo "Enabling workflow $id"
+            gh api -X PUT "repos/$REPO/actions/workflows/$id/enable" --silent
+          done
